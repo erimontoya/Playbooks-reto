@@ -1,0 +1,360 @@
+---
+
+- name: Health Check y baseline de servidores Windows
+
+  hosts: windows
+
+  gather_facts: true
+
+
+  vars:
+
+    usuario_ansible: "ansible"
+
+
+    # Definir la contraseña desde AAP Credential / Survey / Vault.
+
+    # NO almacenar la contraseña directamente en Git.
+
+    password_ansible: "{{ vault_ansible_password }}"
+
+
+    # Umbral a partir del cual reportamos alerta de CPU
+
+    cpu_warning_threshold: 85
+
+
+    # Ajustar según los servicios críticos de cada servidor
+
+    servicios_criticos:
+
+      - WinRM
+
+      - EventLog
+
+      - LanmanServer
+
+      - W32Time
+
+
+  tasks:
+
+
+    # ============================================================
+
+    # 1. VERIFICAR USO DE CPU
+
+    # ============================================================
+
+
+    - name: Consultar porcentaje actual de CPU
+
+      ansible.windows.win_powershell:
+
+        script: |
+
+          $cpu = (Get-CimInstance Win32_Processor |
+
+            Measure-Object -Property LoadPercentage -Average).Average
+
+
+          [PSCustomObject]@{
+
+              CPUPercent = [math]:: 2)
+
+          }
+
+      register: cpu_info
+
+      changed_when: false
+
+
+    - name: Guardar porcentaje de CPU
+
+      ansible.builtin.set_fact:
+
+        cpu_percent: "{{ cpu_info.output[0].CPUPercent }}"
+
+
+    - name: Mostrar uso de CPU
+
+      ansible.builtin.debug:
+
+        msg: "CPU actual: {{ cpu_percent }}%"
+
+
+    - name: Generar alerta si CPU supera el umbral
+
+      ansible.builtin.debug:
+
+        msg: "ALERTA: CPU en {{ cpu_percent }}%, umbral {{ cpu_warning_threshold }}%"
+
+      when: cpu_percent | float >= cpu_warning_threshold | float
+
+
+
+
+    # ============================================================
+
+    # 2. CHEQUEAR SERVICIOS WINDOWS
+
+    # ============================================================
+
+
+    - name: Consultar servicios críticos
+
+      ansible.windows.win_service_info:
+
+        name: "{{ item }}"
+
+      loop: "{{ servicios_criticos }}"
+
+      register: servicios_resultado
+
+
+    - name: Mostrar estado de servicios
+
+      ansible.builtin.debug:
+
+        msg: >-
+
+          Servicio {{ item.item }}:
+
+          {{
+
+            item.services[0].state
+
+            if (item.services | length > 0)
+
+            else 'NO ENCONTRADO'
+
+          }}
+
+      loop: "{{ servicios_resultado.results }}"
+
+
+
+
+    # ============================================================
+
+    # 3. CREAR USUARIO LOCAL ANSIBLE
+
+    # ============================================================
+
+
+    - name: Crear usuario local ansible
+
+      ansible.windows.win_user:
+
+        name: "{{ usuario_ansible }}"
+
+        password: "{{ password_ansible }}"
+
+        description: "Cuenta de automatizacion Ansible"
+
+        state: present
+
+        account_disabled: false
+
+        password_never_expires: true
+
+        groups:
+
+          - Users
+
+        groups_action: add
+
+      no_log: true
+
+
+    - name: Agregar usuario ansible a Administrators
+
+      ansible.windows.win_group_membership:
+
+        name: Administrators
+
+        members:
+
+          - "{{ usuario_ansible }}"
+
+        state: present
+
+
+
+
+    # ============================================================
+
+    # 4. ACTUALIZAR WINDOWS
+
+    # ============================================================
+
+
+    - name: Buscar e instalar actualizaciones Windows
+
+      ansible.windows.win_updates:
+
+        category_names:
+
+          - CriticalUpdates
+
+          - SecurityUpdates
+
+          - UpdateRollups
+
+        state: installed
+
+        reboot: true
+
+      register: windows_update
+
+
+
+
+    # ============================================================
+
+    # 5. RECOPILAR INFORMACION POST-ACTUALIZACION
+
+    # ============================================================
+
+
+    - name: Obtener información general del servidor
+
+      ansible.windows.win_powershell:
+
+        script: |
+
+          $os = Get-CimInstance Win32_OperatingSystem
+
+          $computer = Get-CimInstance Win32_ComputerSystem
+
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+
+          $boot = $os.LastBootUpTime
+
+          $uptime = (Get-Date) - $boot
+
+
+          [PSCustomObject]@{
+
+              Hostname       = $env:COMPUTERNAME
+
+              OS             = $os.Caption
+
+              Version        = $os.Version
+
+              Build          = $os.BuildNumber
+
+              RAMTotalGB     = [math]:: / 1GB, 2)
+
+              DiscoTotalGB   = [math]:: / 1GB, 2)
+
+              DiscoLibreGB   = [math]:: / 1GB, 2)
+
+              UptimeDias     = [math]:: 2)
+
+          }
+
+      register: server_info
+
+      changed_when: false
+
+
+
+
+    # ============================================================
+
+    # 6. GENERAR REPORTE
+
+    # ============================================================
+
+
+    - name: Crear directorio local de reportes
+
+      ansible.builtin.file:
+
+        path: "./reports"
+
+        state: directory
+
+      delegate_to: localhost
+
+      run_once: true
+
+
+    - name: Generar reporte del servidor
+
+      ansible.builtin.copy:
+
+        content: |
+
+          ==========================================================
+
+                       HEALTH CHECK WINDOWS
+
+          ==========================================================
+
+
+          Servidor: {{ server_info.output[0].Hostname }}
+
+          Sistema operativo: {{ server_info.output[0].OS }}
+
+          Version: {{ server_info.output[0].Version }}
+
+          Build: {{ server_info.output[0].Build }}
+
+
+          ----------------------------------------------------------
+
+          RECURSOS
+
+          ----------------------------------------------------------
+
+
+          CPU actual: {{ cpu_percent }} %
+
+          RAM total: {{ server_info.output[0].RAMTotalGB }} GB
+
+
+          Disco C:
+
+          Capacidad: {{ server_info.output[0].DiscoTotalGB }} GB
+
+          Libre: {{ server_info.output[0].DiscoLibreGB }} GB
+
+
+          Uptime: {{ server_info.output[0].UptimeDias }} dias
+
+
+          ----------------------------------------------------------
+
+          SERVICIOS CRITICOS
+
+          ----------------------------------------------------------
+
+
+          {% for servicio in servicios_resultado.results %}
+
+          {{ servicio.item }}:
+
+          {% if servicio.services | length > 0 %}
+
+          Estado: {{ servicio.services[0].state }}
+
+          {% else %}
+
+          Estado: NO ENCONTRADO
+
+          {% endif %}
+
+
+          {% endfor %}
+
+
+          ----------------------------------------------------------
+
+          USUARIO ANSIBLE
+
+          ----------------------------------------------------------
+
+
+     
