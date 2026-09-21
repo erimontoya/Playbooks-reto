@@ -1,0 +1,418 @@
+---
+
+- name: "Hackathon EPM - Reto 1 - Health Check y actualizacion Linux"
+
+  hosts: all
+
+  become: true
+
+  gather_facts: true
+
+
+  vars:
+
+    usuarios_requeridos:
+
+      - ansible
+
+      - ecuador
+
+
+    servicios_criticos:
+
+      - sshd
+
+      - crond
+
+
+    reporte_dir: /tmp/reporte_ansible
+
+
+  tasks:
+
+
+    # ============================================================
+
+    # 1. VALIDAR ESPACIO DISPONIBLE EN /
+
+    # ============================================================
+
+
+    - name: Consultar espacio disponible en /
+
+      ansible.builtin.shell: |
+
+        df -h /
+
+      register: espacio_disco
+
+      changed_when: false
+
+
+    - name: Mostrar espacio disponible en /
+
+      ansible.builtin.debug:
+
+        msg: "{{ espacio_disco.stdout_lines }}"
+
+
+    # ============================================================
+
+    # 2. VERIFICAR SERVICIOS CRITICOS
+
+    # ============================================================
+
+
+    - name: Obtener informacion de servicios
+
+      ansible.builtin.service_facts:
+
+
+    - name: Mostrar estado de servicios criticos
+
+      ansible.builtin.debug:
+
+        msg: >-
+
+          Servicio {{ item }}:
+
+          {{
+
+            ansible_facts.services[item + '.service'].state
+
+            if (item + '.service') in ansible_facts.services
+
+            else 'NO ENCONTRADO'
+
+          }}
+
+      loop: "{{ servicios_criticos }}"
+
+
+    # ============================================================
+
+    # 3. CREAR USUARIOS REQUERIDOS
+
+    # ============================================================
+
+
+    - name: Crear usuarios requeridos
+
+      ansible.builtin.user:
+
+        name: "{{ item }}"
+
+        state: present
+
+        create_home: true
+
+        shell: /bin/bash
+
+      loop: "{{ usuarios_requeridos }}"
+
+
+    - name: Verificar usuarios creados
+
+      ansible.builtin.getent:
+
+        database: passwd
+
+        key: "{{ item }}"
+
+      loop: "{{ usuarios_requeridos }}"
+
+      register: resultado_usuarios
+
+
+    - name: Mostrar resultado de creacion de usuarios
+
+      ansible.builtin.debug:
+
+        msg: "Usuario {{ item.item }} creado correctamente"
+
+      loop: "{{ resultado_usuarios.results }}"
+
+      when: item.ansible_facts.getent_passwd is defined
+
+
+    # ============================================================
+
+    # 4. ACTUALIZAR RED HAT ENTERPRISE LINUX
+
+    # ============================================================
+
+
+    - name: Actualizar paquetes del sistema operativo
+
+      ansible.builtin.dnf:
+
+        name: "*"
+
+        state: latest
+
+        update_cache: true
+
+      register: resultado_actualizacion
+
+
+    - name: Mostrar resultado de actualizacion
+
+      ansible.builtin.debug:
+
+        msg: >-
+
+          Actualizacion del sistema completada.
+
+          Cambios realizados: {{ resultado_actualizacion.changed }}
+
+
+    # ============================================================
+
+    # 5. INSTALAR ZABBIX AGENT
+
+    # ============================================================
+
+
+    - name: Instalar Zabbix Agent
+
+      ansible.builtin.dnf:
+
+        name: zabbix-agent
+
+        state: present
+
+      register: zabbix_install
+
+      ignore_errors: true
+
+
+    - name: Iniciar y habilitar Zabbix Agent
+
+      ansible.builtin.service:
+
+        name: zabbix-agent
+
+        state: started
+
+        enabled: true
+
+      when: zabbix_install is succeeded
+
+      ignore_errors: true
+
+
+    # ============================================================
+
+    # 6. CREAR DIRECTORIO PARA REPORTE
+
+    # ============================================================
+
+
+    - name: Crear directorio de reporte
+
+      ansible.builtin.file:
+
+        path: "{{ reporte_dir }}"
+
+        state: directory
+
+        mode: '0755'
+
+
+    # ============================================================
+
+    # 7. OBTENER INFORMACION DEL SISTEMA
+
+    # ============================================================
+
+
+    - name: Obtener uptime
+
+      ansible.builtin.command: uptime
+
+      register: uptime_result
+
+      changed_when: false
+
+
+    - name: Obtener espacio en disco
+
+      ansible.builtin.command: df -h
+
+      register: discos_result
+
+      changed_when: false
+
+
+    - name: Obtener memoria
+
+      ansible.builtin.command: free -h
+
+      register: memoria_result
+
+      changed_when: false
+
+
+    # ============================================================
+
+    # 8. GENERAR REPORTE
+
+    # ============================================================
+
+
+    - name: Generar reporte de estado de maquina
+
+      ansible.builtin.copy:
+
+        dest: "{{ reporte_dir }}/healthcheck_{{ inventory_hostname }}.txt"
+
+        mode: '0644'
+
+        content: |
+
+          ==================================================
+
+                   HACKATHON EPM - HEALTH CHECK
+
+          ==================================================
+
+
+          Host:
+
+          {{ inventory_hostname }}
+
+
+          Sistema operativo:
+
+          {{ ansible_distribution }}
+
+          {{ ansible_distribution_version }}
+
+
+          Kernel:
+
+          {{ ansible_kernel }}
+
+
+          --------------------------------------------------
+
+          UPTIME
+
+          --------------------------------------------------
+
+
+          {{ uptime_result.stdout }}
+
+
+          --------------------------------------------------
+
+          ESPACIO EN DISCO
+
+          --------------------------------------------------
+
+
+          {{ discos_result.stdout }}
+
+
+          --------------------------------------------------
+
+          MEMORIA
+
+          --------------------------------------------------
+
+
+          {{ memoria_result.stdout }}
+
+
+          --------------------------------------------------
+
+          SERVICIOS CRITICOS
+
+          --------------------------------------------------
+
+
+          {% for servicio in servicios_criticos %}
+
+          {{ servicio }}:
+
+          {% if (servicio + '.service') in ansible_facts.services %}
+
+          {{ ansible_facts.services[servicio + '.service'].state }}
+
+          {% else %}
+
+          NO ENCONTRADO
+
+          {% endif %}
+
+          {% endfor %}
+
+
+          --------------------------------------------------
+
+          USUARIOS REQUERIDOS
+
+          --------------------------------------------------
+
+
+          {% for usuario in usuarios_requeridos %}
+
+          Usuario: {{ usuario }}
+
+          {% endfor %}
+
+
+          --------------------------------------------------
+
+          ZABBIX
+
+          --------------------------------------------------
+
+
+          Instalacion ejecutada: {{ zabbix_install is succeeded }}
+
+
+          ==================================================
+
+                      FIN DEL REPORTE
+
+          ==================================================
+
+
+    # ============================================================
+
+    # 9. RESULTADO FINAL DEL PLAYBOOK
+
+    # ============================================================
+
+
+    - name: Resumen del Reto 1
+
+      ansible.builtin.debug:
+
+        msg:
+
+          - "============================================"
+
+          - " HACKATHON EPM - RETO 1 COMPLETADO"
+
+          - "============================================"
+
+          - "Servidor: {{ inventory_hostname }}"
+
+          - "Sistema: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+          - "Espacio en / validado correctamente"
+
+          - "Servicios criticos verificados"
+
+          - "Usuarios ansible y ecuador verificados"
+
+          - "Actualizacion del S.O ejecutada"
+
+          - "Instalacion de Zabbix procesada"
+
+          - "Reporte generado en:"
+
+          - "{{ reporte_dir }}/healthcheck_{{ inventory_hostname }}.txt"
+ 
