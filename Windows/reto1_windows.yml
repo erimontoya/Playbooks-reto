@@ -1,0 +1,513 @@
+---
+
+- name: "Hackathon EPM - Reto 1 - Health Check y actualizacion Windows"
+
+  hosts: all
+
+  gather_facts: true
+
+
+  vars:
+
+
+    # Usuario requerido por las tareas a automatizar
+
+    usuario_ansible: ansible
+
+
+    # Servicios considerados criticos para el ejercicio
+
+    # Esta lista puede modificarse segun el servidor
+
+    servicios_criticos:
+
+      - WinRM
+
+      - W32Time
+
+      - EventLog
+
+
+    # Ruta donde se almacenara el reporte
+
+    reporte_dir: 'C:\Temp\Reporte_Ansible'
+
+
+  tasks:
+
+
+    # ============================================================
+
+    # 1. VERIFICAR USO DE CPU
+
+    # ============================================================
+
+
+    - name: Obtener uso actual de CPU
+
+      ansible.windows.win_powershell:
+
+        script: |
+
+          $cpu = Get-CimInstance Win32_Processor |
+
+                 Measure-Object -Property LoadPercentage -Average
+
+
+          [PSCustomObject]@{
+
+              CPUPercentage = [math]:: 2)
+
+          }
+
+      register: cpu_result
+
+      changed_when: false
+
+
+    - name: Mostrar uso de CPU
+
+      ansible.builtin.debug:
+
+        msg: "Uso actual de CPU: {{ cpu_result.output[0].CPUPercentage }}%"
+
+
+    # ============================================================
+
+    # 2. VALIDAR ESPACIO DISPONIBLE EN C:\
+
+    # ============================================================
+
+
+    - name: Obtener espacio disponible en C
+
+      ansible.windows.win_powershell:
+
+        script: |
+
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+
+
+          [PSCustomObject]@{
+
+              Unidad     = $disk.DeviceID
+
+              TotalGB    = [math]:: / 1GB, 2)
+
+              LibreGB    = [math]:: / 1GB, 2)
+
+              UsadoGB    = [math]::
+
+                            ($disk.Size - $disk.FreeSpace) / 1GB, 2)
+
+              LibrePorcentaje = [math]::
+
+                            ($disk.FreeSpace / $disk.Size) * 100, 2)
+
+          }
+
+      register: disk_result
+
+      changed_when: false
+
+
+    - name: Mostrar espacio disponible en C
+
+      ansible.builtin.debug:
+
+        msg:
+
+          - "Unidad: {{ disk_result.output[0].Unidad }}"
+
+          - "Espacio total: {{ disk_result.output[0].TotalGB }} GB"
+
+          - "Espacio usado: {{ disk_result.output[0].UsadoGB }} GB"
+
+          - "Espacio libre: {{ disk_result.output[0].LibreGB }} GB"
+
+          - "Porcentaje libre: {{ disk_result.output[0].LibrePorcentaje }}%"
+
+
+    # ============================================================
+
+    # 3. VERIFICAR SERVICIOS CRITICOS DE WINDOWS
+
+    # ============================================================
+
+
+    - name: Consultar estado de servicios criticos
+
+      ansible.windows.win_service_info:
+
+        name: "{{ item }}"
+
+      loop: "{{ servicios_criticos }}"
+
+      register: servicios_result
+
+      changed_when: false
+
+
+    - name: Mostrar estado de servicios criticos
+
+      ansible.builtin.debug:
+
+        msg: >-
+
+          Servicio {{ item.item }}:
+
+          {{
+
+            item.services[0].state
+
+            if item.exists
+
+            else 'NO ENCONTRADO'
+
+          }}
+
+      loop: "{{ servicios_result.results }}"
+
+
+    # ============================================================
+
+    # 4. CREAR USUARIO ANSIBLE
+
+    # ============================================================
+
+
+    - name: Crear usuario local ansible
+
+      ansible.windows.win_user:
+
+        name: "{{ usuario_ansible }}"
+
+        state: present
+
+        password_never_expires: true
+
+        user_cannot_change_password: false
+
+        account_disabled: false
+
+      register: usuario_result
+
+
+    - name: Verificar usuario ansible
+
+      ansible.windows.win_powershell:
+
+        script: |
+
+          $user = Get-LocalUser -Name "{{ usuario_ansible }}" `
+
+                  -ErrorAction SilentlyContinue
+
+
+          if ($null -ne $user) {
+
+              [PSCustomObject]@{
+
+                  Usuario = $user.Name
+
+                  Existe  = $true
+
+                  Enabled = $user.Enabled
+
+              }
+
+          }
+
+          else {
+
+              [PSCustomObject]@{
+
+                  Usuario = "{{ usuario_ansible }}"
+
+                  Existe  = $false
+
+                  Enabled = $false
+
+              }
+
+          }
+
+      register: user_check
+
+      changed_when: false
+
+
+    - name: Mostrar resultado de creacion del usuario
+
+      ansible.builtin.debug:
+
+        msg: >-
+
+          Usuario {{ usuario_ansible }} creado correctamente.
+
+          Estado habilitado:
+
+          {{ user_check.output[0].Enabled }}
+
+      when: user_check.output[0].Existe
+
+
+    # ============================================================
+
+    # 5. ACTUALIZAR WINDOWS
+
+    # ============================================================
+
+
+    - name: Buscar e instalar actualizaciones de Windows
+
+      ansible.windows.win_updates:
+
+        category_names:
+
+          - CriticalUpdates
+
+          - SecurityUpdates
+
+          - UpdateRollups
+
+          - Updates
+
+        state: installed
+
+        reboot: true
+
+      register: windows_update
+
+
+    - name: Mostrar resultado de Windows Update
+
+      ansible.builtin.debug:
+
+        msg:
+
+          - "Proceso de actualizacion de Windows ejecutado."
+
+          - "Actualizaciones encontradas: {{ windows_update.found_update_count | default(0) }}"
+
+          - "Actualizaciones instaladas: {{ windows_update.installed_update_count | default(0) }}"
+
+          - "Reinicio requerido: {{ windows_update.reboot_required | default(false) }}"
+
+
+    # ============================================================
+
+    # 6. CREAR DIRECTORIO PARA EL REPORTE
+
+    # ============================================================
+
+
+    - name: Crear directorio para reporte
+
+      ansible.windows.win_file:
+
+        path: "{{ reporte_dir }}"
+
+        state: directory
+
+
+    # ============================================================
+
+    # 7. OBTENER INFORMACION GENERAL DEL SERVIDOR
+
+    # ============================================================
+
+
+    - name: Obtener informacion adicional del servidor
+
+      ansible.windows.win_powershell:
+
+        script: |
+
+          $os = Get-CimInstance Win32_OperatingSystem
+
+
+          [PSCustomObject]@{
+
+              Hostname    = $env:COMPUTERNAME
+
+              Sistema     = $os.Caption
+
+              Version     = $os.Version
+
+              Build       = $os.BuildNumber
+
+              MemoriaGB   = [math]::
+
+                              $os.TotalVisibleMemorySize / 1MB, 2)
+
+              FechaHora   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+          }
+
+      register: system_info
+
+      changed_when: false
+
+
+    # ============================================================
+
+    # 8. GENERAR REPORTE DE ESTADO
+
+    # ============================================================
+
+
+    - name: Generar reporte de Health Check
+
+      ansible.windows.win_copy:
+
+        dest: "{{ reporte_dir }}\\healthcheck_{{ inventory_hostname }}.txt"
+
+        content: |
+
+          ==================================================
+
+                 HACKATHON EPM - HEALTH CHECK WINDOWS
+
+          ==================================================
+
+
+          SERVIDOR
+
+          --------------------------------------------------
+
+          Hostname: {{ system_info.output[0].Hostname }}
+
+          Sistema: {{ system_info.output[0].Sistema }}
+
+          Version: {{ system_info.output[0].Version }}
+
+          Build: {{ system_info.output[0].Build }}
+
+          Fecha: {{ system_info.output[0].FechaHora }}
+
+
+          CPU
+
+          --------------------------------------------------
+
+          Uso CPU: {{ cpu_result.output[0].CPUPercentage }}%
+
+
+          MEMORIA
+
+          --------------------------------------------------
+
+          Memoria total:
+
+          {{ system_info.output[0].MemoriaGB }} GB
+
+
+          DISCO C:
+
+          --------------------------------------------------
+
+          Total: {{ disk_result.output[0].TotalGB }} GB
+
+          Usado: {{ disk_result.output[0].UsadoGB }} GB
+
+          Libre: {{ disk_result.output[0].LibreGB }} GB
+
+          Porcentaje libre:
+
+          {{ disk_result.output[0].LibrePorcentaje }}%
+
+
+          SERVICIOS CRITICOS
+
+          --------------------------------------------------
+
+          {% for resultado in servicios_result.results %}
+
+          {{ resultado.item }}:
+
+          {% if resultado.exists %}
+
+          {{ resultado.services[0].state }}
+
+          {% else %}
+
+          NO ENCONTRADO
+
+          {% endif %}
+
+          {% endfor %}
+
+
+          USUARIO
+
+          --------------------------------------------------
+
+          Usuario: {{ usuario_ansible }}
+
+          Existe: {{ user_check.output[0].Existe }}
+
+          Habilitado: {{ user_check.output[0].Enabled }}
+
+
+          WINDOWS UPDATE
+
+          --------------------------------------------------
+
+          Encontradas:
+
+          {{ windows_update.found_update_count | default(0) }}
+
+
+          Instaladas:
+
+          {{ windows_update.installed_update_count | default(0) }}
+
+
+          Reinicio requerido:
+
+          {{ windows_update.reboot_required | default(false) }}
+
+
+          ==================================================
+
+                       FIN DEL REPORTE
+
+          ==================================================
+
+
+    # ============================================================
+
+    # 9. RESULTADO FINAL
+
+    # ============================================================
+
+
+    - name: Mostrar resumen del Reto 1
+
+      ansible.builtin.debug:
+
+        msg:
+
+          - "============================================"
+
+          - " HACKATHON EPM - RETO 1 WINDOWS COMPLETADO"
+
+          - "============================================"
+
+          - "Servidor: {{ inventory_hostname }}"
+
+          - "CPU validada: {{ cpu_result.output[0].CPUPercentage }}%"
+
+          - "Espacio disponible C: {{ disk_result.output[0].LibreGB }} GB"
+
+          - "Servicios criticos verificados"
+
+          - "Usuario ansible verificado"
+
+          - "Actualizacion del S.O. ejecutada"
+
+          - "Reporte generado:"
+
+          - "{{ reporte_dir }}\\healthcheck_{{ inventory_hostname }}.txt"
+ 
