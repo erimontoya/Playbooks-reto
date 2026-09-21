@@ -1,0 +1,472 @@
+---
+
+- name: Baseline y validacion de servidores Red Hat
+
+  hosts: linux
+
+  become: true
+
+  gather_facts: true
+
+
+  vars:
+
+    usuario_ansible: ansible
+
+
+    # Cambiar por los servicios criticos de EPM/servidor
+
+    servicios_criticos:
+
+      - sshd
+
+
+    # Zabbix
+
+    zabbix_server: "10.10.10.100"
+
+    zabbix_package: "zabbix-agent2"
+
+    zabbix_service: "zabbix-agent2"
+
+
+    # Alertar si una particion supera este porcentaje
+
+    disk_warning_threshold: 85
+
+
+  tasks:
+
+
+    # =========================================================
+
+    # 1. VALIDACIONES INICIALES
+
+    # =========================================================
+
+
+    - name: Consultar uso de disco
+
+      ansible.builtin.command:
+
+        cmd: df -P -x tmpfs -x devtmpfs
+
+      register: disk_usage
+
+      changed_when: false
+
+
+    - name: Detectar particiones con alto uso
+
+      ansible.builtin.shell: |
+
+        set -o pipefail
+
+        df -P -x tmpfs -x devtmpfs |
+
+        awk 'NR>1 {
+
+          gsub(/%/,"",$5);
+
+          if ($5 >= {{ disk_warning_threshold }})
+
+            print $6 " = " $5 "%"
+
+        }'
+
+      args:
+
+        executable: /bin/bash
+
+      register: disk_alerts
+
+      changed_when: false
+
+      failed_when: false
+
+
+    # =========================================================
+
+    # 2. SERVICIOS CRITICOS
+
+    # =========================================================
+
+
+    - name: Obtener informacion de servicios
+
+      ansible.builtin.service_facts:
+
+
+    - name: Validar servicios criticos
+
+      ansible.builtin.assert:
+
+        that:
+
+          - ansible_facts.services[item + '.service'] is defined
+
+          - ansible_facts.services[item + '.service'].state == 'running'
+
+        fail_msg: "ALERTA: El servicio {{ item }} no esta ejecutandose."
+
+        success_msg: "OK: El servicio {{ item }} esta ejecutandose."
+
+      loop: "{{ servicios_criticos }}"
+
+      register: critical_services_check
+
+      ignore_errors: true
+
+
+    # =========================================================
+
+    # 3. CREAR USUARIO ANSIBLE
+
+    # =========================================================
+
+
+    - name: Crear usuario ansible
+
+      ansible.builtin.user:
+
+        name: "{{ usuario_ansible }}"
+
+        comment: "Automation Account - Ansible"
+
+        shell: /bin/bash
+
+        create_home: true
+
+        state: present
+
+
+    - name: Crear directorio SSH
+
+      ansible.builtin.file:
+
+        path: "/home/{{ usuario_ansible }}/.ssh"
+
+        state: directory
+
+        owner: "{{ usuario_ansible }}"
+
+        group: "{{ usuario_ansible }}"
+
+        mode: "0700"
+
+
+    # Recomendado:
+
+    # agregar authorized_key usando una llave publica,
+
+    # NO una contraseña embebida en el playbook.
+
+
+    - name: Permitir sudo al usuario ansible
+
+      ansible.builtin.copy:
+
+        dest: "/etc/sudoers.d/{{ usuario_ansible }}"
+
+        content: "{{ usuario_ansible }} ALL=(ALL) NOPASSWD: ALL\n"
+
+        owner: root
+
+        group: root
+
+        mode: "0440"
+
+        validate: "/usr/sbin/visudo -cf %s"
+
+
+    # =========================================================
+
+    # 4. ACTUALIZAR RED HAT
+
+    # =========================================================
+
+
+    - name: Actualizar todos los paquetes instalados
+
+      ansible.builtin.dnf:
+
+        name: "*"
+
+        state: latest
+
+        update_cache: true
+
+      register: update_result
+
+
+    # =========================================================
+
+    # 5. INSTALAR ZABBIX AGENT
+
+    # =========================================================
+
+    #
+
+    # IMPORTANTE:
+
+    # Este bloque asume que el repositorio que contiene
+
+    # zabbix-agent2 ya esta configurado en el servidor.
+
+    #
+
+    # Si EPM utiliza Satellite/repo interno, apuntaria alli.
+
+    # =========================================================
+
+
+    - name: Instalar Zabbix Agent 2
+
+      ansible.builtin.dnf:
+
+        name: "{{ zabbix_package }}"
+
+        state: present
+
+      register: zabbix_install
+
+
+    - name: Configurar servidor Zabbix
+
+      ansible.builtin.lineinfile:
+
+        path: /etc/zabbix/zabbix_agent2.conf
+
+        regexp: '^Server='
+
+        line: "Server={{ zabbix_server }}"
+
+      notify: Reiniciar Zabbix
+
+
+    - name: Configurar servidor Zabbix activo
+
+      ansible.builtin.lineinfile:
+
+        path: /etc/zabbix/zabbix_agent2.conf
+
+        regexp: '^ServerActive='
+
+        line: "ServerActive={{ zabbix_server }}"
+
+      notify: Reiniciar Zabbix
+
+
+    - name: Configurar hostname del agente Zabbix
+
+      ansible.builtin.lineinfile:
+
+        path: /etc/zabbix/zabbix_agent2.conf
+
+        regexp: '^Hostname='
+
+        line: "Hostname={{ inventory_hostname }}"
+
+      notify: Reiniciar Zabbix
+
+
+    - name: Habilitar y arrancar Zabbix
+
+      ansible.builtin.systemd:
+
+        name: "{{ zabbix_service }}"
+
+        enabled: true
+
+        state: started
+
+
+    # Aplicar handlers antes del reporte
+
+    - name: Ejecutar handlers pendientes
+
+      ansible.builtin.meta: flush_handlers
+
+
+    # =========================================================
+
+    # 6. ESTADO FINAL
+
+    # =========================================================
+
+
+    - name: Obtener uptime
+
+      ansible.builtin.command:
+
+        cmd: uptime
+
+      register: uptime_result
+
+      changed_when: false
+
+
+    - name: Obtener version del kernel
+
+      ansible.builtin.command:
+
+        cmd: uname -r
+
+      register: kernel_result
+
+      changed_when: false
+
+
+    - name: Obtener estado final de Zabbix
+
+      ansible.builtin.systemd:
+
+        name: "{{ zabbix_service }}"
+
+      register: zabbix_status
+
+
+    # =========================================================
+
+    # 7. GENERAR REPORTE
+
+    # =========================================================
+
+
+    - name: Crear reporte local por servidor
+
+      ansible.builtin.copy:
+
+        content: |
+
+          =====================================================
+
+          REPORTE DE ESTADO DEL SERVIDOR
+
+          =====================================================
+
+
+          Host: {{ inventory_hostname }}
+
+          FQDN: {{ ansible_facts.fqdn }}
+
+          IP: {{ ansible_default_ipv4.address | default('N/D') }}
+
+
+          Sistema operativo:
+
+          {{ ansible_distribution }} {{ ansible_distribution_version }}
+
+
+          Kernel:
+
+          {{ kernel_result.stdout }}
+
+
+          Arquitectura:
+
+          {{ ansible_architecture }}
+
+
+          Memoria total:
+
+          {{ ansible_memtotal_mb }} MB
+
+
+          Uptime:
+
+          {{ uptime_result.stdout }}
+
+
+          -----------------------------------------------------
+
+          ESPACIO EN DISCO
+
+          -----------------------------------------------------
+
+
+          {{ disk_usage.stdout }}
+
+
+          -----------------------------------------------------
+
+          ALERTAS DE DISCO >= {{ disk_warning_threshold }}%
+
+          -----------------------------------------------------
+
+
+          {% if disk_alerts.stdout | length > 0 %}
+
+          {{ disk_alerts.stdout }}
+
+          {% else %}
+
+          OK - No existen particiones sobre el umbral.
+
+          {% endif %}
+
+
+          -----------------------------------------------------
+
+          ACTUALIZACION DEL SISTEMA
+
+          -----------------------------------------------------
+
+
+          Cambios realizados:
+
+          {{ update_result.changed }}
+
+
+          -----------------------------------------------------
+
+          ZABBIX
+
+          -----------------------------------------------------
+
+
+          Paquete:
+
+          {{ zabbix_package }}
+
+
+          Estado:
+
+          {{ zabbix_status.status.ActiveState | default('N/D') }}
+
+
+          Habilitado:
+
+          {{ zabbix_status.status.UnitFileState | default('N/D') }}
+
+
+          -----------------------------------------------------
+
+          FECHA DE EJECUCION
+
+          -----------------------------------------------------
+
+
+          {{ ansible_date_time.iso8601 }}
+
+
+          =====================================================
+
+        dest: "./reports/{{ inventory_hostname }}_status.txt"
+
+      delegate_to: localhost
+
+      become: false
+
+
+  handlers:
+
+
+    - name: Reiniciar Zabbix
+
+      ansible.builtin.systemd:
+
+        name: "{{ zabbix_service }}"
+
+        state: restarted
+ 
